@@ -30,5 +30,5 @@ pip install -r requirements.txt
 ## running
 You can run the code by running the following command:
 ```shell
-run_acke.py
+python run_acke.py
 ```
