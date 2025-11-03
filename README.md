@@ -15,7 +15,7 @@ EasyEdit-main/
 │       └── ACKE/...
 │
 ├── hparams/
-│   ├── ACKE/
+│   └── ACKE/
 │       └── llama-7b.yaml
 │
 │
