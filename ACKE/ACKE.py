@@ -57,7 +57,6 @@ class ACKE(torch.nn.Module):
         elif hasattr(self.model.config, 'activation_function'):
             self.config.hidden_act = self.model.config.activation_function
         
-        # 支持多个层的编辑
         if isinstance(config.inner_params, list):
             self.layers = config.inner_params
         else:
@@ -71,8 +70,8 @@ class ACKE(torch.nn.Module):
         print(self.layers)
         
         self.device = device
-        self.adapter_layers = {}  # 存储多个adapter层
-        self.original_layers = {}  # 存储多个原始层
+        self.adapter_layers = {}
+        self.original_layers = {}
 
         # --- ensure proper formatting (ACKE edits weights matrices) ---
         suffixes = [".weight", ".bias"]
@@ -125,19 +124,8 @@ class ACKE(torch.nn.Module):
         setattr(adapter_layer[layer_name].edit_module, layer_name_short, adapter_layer[layer_name].original_layer)
 
     def get_adapter_layer(self, layer_name=None):
-        """
-        获取指定层的adapter层
-        
-        Args:
-            layer_name: 层名称，如果为None则返回第一个adapter层（向后兼容）
-            
-        Returns:
-            对应的ACKEAdapter实例，如果不存在则返回None
-        """
-        
         if layer_name is None:
-            # 向后兼容：如果没有指定layer_name，返回第一个adapter层
-            print("没有接收到layername")
+            print("didn't recieve layername")
             if self.adapter_layers:
                 return next(iter(self.adapter_layers.values())).to(self.model.device)
             return None
@@ -173,27 +161,32 @@ class ACKE(torch.nn.Module):
 
         for layer_name in self.layers:
             print(layer_name)
-
+            
+            #setattr(eval(f"self.model.{layer_name}"), "training", True)
+            #setattr(eval(f"self.model.{layer_name}"), "editing", True)
             self.get_adapter_layer(layer_name).training = True
             self.get_adapter_layer(layer_name).editing = True
             self.get_adapter_layer(layer_name).set_parameter_tunable()
-
+            
+            #if getattr(eval(f"self.model.{layer_name}"), "editing_total_cnt") % self.config.save_freq == 0:
+            #    self.get_adapter_layer(layer_name).generate_activation_mask(self.config.mask_ratio)
             if self.get_adapter_layer(layer_name).editing_total_cnt % self.config.save_freq == 0:
                 self.get_adapter_layer(layer_name).generate_activation_mask(self.config.mask_ratio)
 
-        # --- train Wise value ---
+        # --- train Acke value ---
         loss_meter = EarlyStopMeter()
         for i in range(config.n_iter):
 
             if i == 0:
-
                 params_to_optimize = []
                 for layer_name in self.layers:
                     params_to_optimize.append(self.get_adapter_layer(layer_name).new_weight)
                 
                 optimizer = torch.optim.SGD(params_to_optimize, config.edit_lr, weight_decay=1e-5)
+                print("学习率为:", optimizer.param_groups[0]['lr'])
 
             ft_loss = self._cal_ft_loss(tokens, last_prompt_token_loc)
+
             loss = ft_loss
 
 
@@ -208,16 +201,13 @@ class ACKE(torch.nn.Module):
             optimizer.zero_grad()
             loss.backward()
 
-            # 计算分层权重
             layer_weights = self._cal_adaptive_layer_weights()
-            
-            # 应用分层权重到梯度
+
             for layer_name in self.layers:
                 adapter = self.get_adapter_layer(layer_name)
                 if adapter.new_weight.grad is not None:
                     adapter.new_weight.grad *= layer_weights[layer_name]
 
-            # 对所有层应用梯度掩码
             for layer_name in self.layers:
                 self.get_adapter_layer(layer_name).mask_new_weight_gradient()
 
@@ -226,7 +216,6 @@ class ACKE(torch.nn.Module):
             optimizer.step()
             loss_meter.update(loss.item())
 
-            # 对所有层应用范数约束
             if type(self.config.norm_constraint) is float:
                 self._norm_constraint(self.config.norm_constraint)
 
@@ -243,17 +232,14 @@ class ACKE(torch.nn.Module):
             editing_total_cnt = self.get_adapter_layer(layer_name).editing_total_cnt + 1
             self.get_adapter_layer(layer_name).editing_total_cnt = editing_total_cnt
             
-            # 保存权重到记忆
             if self.config.save_freq is not None and editing_total_cnt % self.config.save_freq == 0:
                 self.get_adapter_layer(layer_name).save_weight()
                 print(f'Add New Weight to Memory for layer {layer_name}...')
             
-            # 定期合并权重
             if editing_total_cnt % self.config.merge_freq == 0:
                 self.get_adapter_layer(layer_name).merge_weight()
                 print(f'Merge Weight of (New, Original) Matrix for layer {layer_name}... with {self.config.merge_alg}')
 
-        # 更新编辑历史
         if any(self.get_adapter_layer(layer_name).editing_total_cnt % self.config.merge_freq == 0 for layer_name in self.layers):
             merge_group_edit_history.append(edit_history)
             edit_history = []
@@ -325,25 +311,20 @@ class ACKE(torch.nn.Module):
         return sum(total_loss) / len(total_loss)
 
     def _cal_adaptive_layer_weights(self):
-        """
-        根据每层的重要性自适应调整权重
-        """
         layer_weights = {}
         total_importance = 0
         
         for layer_name in self.layers:
             adapter = self.get_adapter_layer(layer_name)
             
-            # 计算层的编辑重要性（基于梯度范数）
             if adapter.new_weight.grad is not None:
                 importance = torch.norm(adapter.new_weight.grad)
             else:
-                importance = 1.0  # 默认重要性
+                importance = 1.0 
             
             layer_weights[layer_name] = importance
             total_importance += importance
         
-        # 归一化权重，可能要改
         for layer_name in layer_weights:
             layer_weights[layer_name] /= total_importance
         
@@ -373,60 +354,76 @@ class ACKE(torch.nn.Module):
 
     def save(self, save_path):
         import os
-        directory = os.path.dirname(save_path)
-        if directory and not os.path.exists(directory):
-            os.makedirs(directory)  # Create the directory if it doesn't exist
 
         # Save additional information, such as memory_weight, memory_mean_act, etc.
-        additional_info = {}
-        for layer_name, adapter_layer in self.adapter_layers.items():
-            additional_info[layer_name] = {
-                'memory_weight': adapter_layer.memory_weight,
-                'memory_mean_act': adapter_layer.memory_mean_act,
-                'merge_cnt': adapter_layer.merge_cnt,
-                'editing_mean_act': adapter_layer.editing_mean_act,
-                'editing_total_cnt': adapter_layer.editing_total_cnt,
-                'weight_mask': adapter_layer.weight_mask,
+        i = 0
+        for layer_name in self.layers:
+            additional_info = {
+                'memory_weight': self.get_adapter_layer(layer_name).memory_weight,
+                'memory_mean_act': self.get_adapter_layer(layer_name).memory_mean_act,
+                'merge_cnt': self.get_adapter_layer(layer_name).merge_cnt,
+                'editing_mean_act': self.get_adapter_layer(layer_name).editing_mean_act,
+                'editing_total_cnt': self.get_adapter_layer(layer_name).editing_total_cnt,
+                'weight_mask': self.get_adapter_layer(layer_name).weight_mask,
                 # Add other variables that need to be saved
             }
-            if hasattr(adapter_layer, 'key_id') and adapter_layer.key_id is not None:
-                additional_info[layer_name]['key_id'] = adapter_layer.key_id
-        # Save all information to the file
-        torch.save({
-            'adapter_state_dict': {k: v.state_dict() for k, v in self.adapter_layers.items()},
-            'config': self.config,
-            'additional_info': additional_info,
-            'edit_history': edit_history,
-            'merge_group_edit_history': merge_group_edit_history
-        }, save_path)
+            if hasattr(self.get_adapter_layer(layer_name), 'key_id') and self.get_adapter_layer(layer_name).key_id is not None:
+                additional_info['key_id'] = self.get_adapter_layer(layer_name).key_id
+            # Save all information to the file
+            if i == 0:
+                save_path = "./acke_checkpoint/llama单片100全自动27.pt"
+            elif i == 1:
+                save_path = "./acke_checkpoint/llama单片100全自动26.pt"
+            elif i == 2:
+                save_path = "./acke_checkpoint/llama单片100全自动25.pt"
+            directory = os.path.dirname(save_path)
+            if directory and not os.path.exists(directory):
+                os.makedirs(directory)  # Create the directory if it doesn't exist
+            torch.save({
+                'adapter_state_dict': self.get_adapter_layer(layer_name).state_dict(),
+                'config': self.config,
+                'additional_info': additional_info,
+                'edit_history': edit_history,
+                'merge_group_edit_history': merge_group_edit_history
+            }, save_path)
+            i += 1
 
     def load(self, load_path):
         import os
-        if not os.path.exists(load_path):
-            raise FileNotFoundError(f"Checkpoint file not found: {load_path}")
+        #暂时无视这个
+        #if not os.path.exists(load_path):
+        #    raise FileNotFoundError(f"Checkpoint file not found: {load_path}")
+        i = 0 
+        for layer_name in self.layers:
+            # Load all previously saved information
+            if i == 0:
+                load_path = "./acke_checkpoint/llama单片全自动27.pt"
+            elif i == 1:
+                load_path = "./acke_checkpoint/llama单片全自动26.pt"
+            elif i == 2:
+                load_path = "./acke_checkpoint/llama单片全自动25.pt"
+            saved_data = torch.load(load_path)
+            if hasattr(self.model.config, 'hidden_act'):
+                saved_data['config'].hidden_act = self.model.config.hidden_act
+            elif hasattr(self.model.config, 'activation_function'):
+                saved_data['config'].hidden_act = self.model.config.activation_function
+            if saved_data['config'] != self.config:
+                print("Warning: The loaded ACKE config is different from the original config")
 
-        # Load all previously saved information
-        saved_data = torch.load(load_path)
-        if hasattr(self.model.config, 'hidden_act'):
-            saved_data['config'].hidden_act = self.model.config.hidden_act
-        elif hasattr(self.model.config, 'activation_function'):
-            saved_data['config'].hidden_act = self.model.config.activation_function
-        if saved_data['config'] != self.config:
-            print("Warning: The loaded ACKE config is different from the original config")
+            # Restore the state dictionary of the ACKE Adapter instance
 
-        # Restore the state dictionary of the ACKE Adapter instance
-        for layer_name, adapter_layer in self.adapter_layers.items():
-            adapter_layer.load_state_dict(saved_data['adapter_state_dict'][layer_name])
-        # Restore additional information
-        for layer_name, adapter_layer in self.adapter_layers.items():
-            for key, value in saved_data['additional_info'][layer_name].items():
+            self.get_adapter_layer(layer_name).load_state_dict(saved_data['adapter_state_dict'])
+            # Restore additional information
+            adapter_layer = self.get_adapter_layer(layer_name)
+            for key, value in saved_data['additional_info'].items():
                 setattr(adapter_layer, key, value)
-        
-        # Restore editing history
-        global edit_history, merge_group_edit_history
-        edit_history = saved_data['edit_history']
-        merge_group_edit_history = saved_data['merge_group_edit_history']
-        print(f"Model configuration and ACKE state loaded from {load_path}")
+
+            # Restore editing history
+            global edit_history, merge_group_edit_history
+            edit_history = saved_data['edit_history']
+            merge_group_edit_history = saved_data['merge_group_edit_history']
+            print(f"Model configuration and ACKE state loaded from {load_path}")
+            i += 1
 
 
 
@@ -513,25 +510,24 @@ class ACKEAdapter(torch.nn.Module):
         self.editing_mean_act.update(in_scope_dist.mean().item())
 
     def generate_activation_mask(self, mask_ratio):
-        # 写的很好懂了，就是随机生成mask_ratio比例个1的权重mask(就是1的比例是mask_ratio的，1是随机分布的和权重矩阵同形状的01矩阵)
         p_grad = self.new_weight.reshape(-1)
         p_mask = np.random.choice([1, 0], size=p_grad.size()[0], p=[mask_ratio, 1 - mask_ratio])
         p_mask = torch.from_numpy(p_mask).to(p_grad.device)
         self.weight_mask = p_mask
 
-    # 没被用过，那mask应该就是没变动过
+
     def generate_non_overlapping_mask(self, mask_ratio):
         p_grad = self.new_weight.reshape(-1)
         mask_size = int(mask_ratio * p_grad.size()[0])
         if self.used_mask is None:
             self.used_mask = np.zeros(p_grad.size()[0], dtype=bool)
-        available_indices = np.where(~self.used_mask)[0]  # 获取未被遮罩的元素索引
+        available_indices = np.where(~self.used_mask)[0]  
         if len(available_indices) < mask_size:
             raise ValueError("Not enough unused elements to generate a new mask.")
         chosen_indices = np.random.choice(available_indices, size=mask_size, replace=False)
         mask_array = np.zeros(p_grad.size()[0], dtype=int)
         mask_array[chosen_indices] = 1
-        self.used_mask[chosen_indices] = True  # 更新遮罩状态
+        self.used_mask[chosen_indices] = True  
         self.weight_mask = torch.from_numpy(mask_array).to(p_grad.device)
 
     def new_weight_forward(self, input: Tensor) -> Tensor:
@@ -553,22 +549,26 @@ class ACKEAdapter(torch.nn.Module):
             self.new_weight_layer_output = layer_out
             self.original_layer_output = self.original_layer(*args)
         else:
-            #no merge
+            #非merge
             original_layer_output = self.original_layer(*args)
-            #layer_out = self.new_weight_forward(*args)
+            layer_out = self.new_weight_forward(*args)
             
             #merge
-            layer_out = self.layer(*args)
+            #layer_out = self.layer(*args)
             
             if globalact.actglo == False:
+                print("测试不激活")
                 with open ('./nnocheck.txt','a') as file:
                     file.write('ori\n')
                     file.close()
                 layer_out = original_layer_output
+                return layer_out
             else:
                 with open ('./nnocheck.txt','a') as file:
                     file.write('new\n')
                     file.close()
+                print("测试激活")
+            
                 
         return layer_out
 
@@ -586,7 +586,7 @@ class ACKEMultimodal(ACKE):
         if getattr(eval(f"self.model.{self.layers[0]}"), "editing_total_cnt") % self.config.save_freq == 0:
             self.adapter_layers[self.layers[0]].generate_activation_mask(self.config.mask_ratio)        
         
-        # --- train Wise value ---
+        # --- train Acke value ---
         loss_meter = EarlyStopMeter()
         for i in range(config.n_iter):
             if i == 0:
@@ -662,7 +662,7 @@ class ACKEMultimodal(ACKE):
             if type(self.config.norm_constraint) is float:
                 super()._norm_constraint(self.config.norm_constraint)
 
-        # --- pull out info we want to log from the Wise layer ---
+        # --- pull out info we want to log from the Acke layer ---
         setattr(eval(f"self.model.{self.layers[0]}"), "editing", False)
         setattr(eval(f"self.model.{self.layers[0]}"), "training", False)
 
