@@ -13,12 +13,9 @@ EasyEdit-main/
 │   │
 │   └── models
 │       └── ACKE/...
-│
 ├── hparams/
 │   └── ACKE/
 │       └── llama-7b.yaml
-│
-│
 └── run_acke.py
 ```
 
