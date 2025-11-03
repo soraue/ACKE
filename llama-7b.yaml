@@ -32,6 +32,5 @@ replay: False # True --> will replay the past editing instances: see https://arx
 model_parallel: False
 
 # for save and load
-#save_path: "./wise_checkpoint/llama原版wise编辑用edit不retrieve.pt"
-#save_path: "./wise_checkpoint/llama带编辑前后损失无阈值27层编辑eval.pt"
-#load_path: "./wise_checkpoint/wise1000.pt"
+#save_path: "./acke_checkpoint/acke1000.pt"
+#load_path: "./acke_checkpoint/acke1000.pt"
