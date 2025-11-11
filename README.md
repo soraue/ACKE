@@ -27,6 +27,9 @@ conda activate ACKE
 pip install -r requirements.txt
 ```
 
+## Data
+Our experiment data can also be found at [easyedit](https://github.com/zjunlp/EasyEdit).
+
 ## running
 You can run the code by running the following command:
 ```shell
