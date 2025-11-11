@@ -28,7 +28,7 @@ pip install -r requirements.txt
 ```
 
 ## Data
-Our experiment data can also be found at [easyedit](https://github.com/zjunlp/EasyEdit).
+The data of our experiment can also be found at [easyedit](https://github.com/zjunlp/EasyEdit).
 
 ## running
 You can run the code by running the following command:
